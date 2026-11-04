@@ -106,5 +106,26 @@ export async function installInvariantChecks(db: Database) {
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'rate_counter_nonnegative' AND conrelid = 'rate_limit_counters'::regclass) THEN
       ALTER TABLE rate_limit_counters ADD CONSTRAINT rate_counter_nonnegative CHECK (count >= 0);
     END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'run_groups_case_unique' AND conrelid = 'run_groups'::regclass) THEN
+      ALTER TABLE run_groups ADD CONSTRAINT run_groups_case_unique UNIQUE (id, case_id);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'agent_runs_case_unique' AND conrelid = 'agent_runs'::regclass) THEN
+      ALTER TABLE agent_runs ADD CONSTRAINT agent_runs_case_unique UNIQUE (id, case_id);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'agent_runs_group_same_case' AND conrelid = 'agent_runs'::regclass) THEN
+      ALTER TABLE agent_runs ADD CONSTRAINT agent_runs_group_same_case FOREIGN KEY (run_group_id, case_id) REFERENCES run_groups (id, case_id) ON DELETE RESTRICT ON UPDATE RESTRICT;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'issues_source_run_same_case' AND conrelid = 'issues'::regclass) THEN
+      ALTER TABLE issues ADD CONSTRAINT issues_source_run_same_case FOREIGN KEY (source_run_id, case_id) REFERENCES agent_runs (id, case_id) ON DELETE RESTRICT ON UPDATE RESTRICT;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'claims_agent_run_same_case' AND conrelid = 'claims'::regclass) THEN
+      ALTER TABLE claims ADD CONSTRAINT claims_agent_run_same_case FOREIGN KEY (agent_run_id, case_id) REFERENCES agent_runs (id, case_id) ON DELETE RESTRICT ON UPDATE RESTRICT;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'packets_run_group_same_case' AND conrelid = 'packet_versions'::regclass) THEN
+      ALTER TABLE packet_versions ADD CONSTRAINT packets_run_group_same_case FOREIGN KEY (run_group_id, case_id) REFERENCES run_groups (id, case_id) ON DELETE RESTRICT ON UPDATE RESTRICT;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'documents_supersedes_same_case' AND conrelid = 'documents'::regclass) THEN
+      ALTER TABLE documents ADD CONSTRAINT documents_supersedes_same_case FOREIGN KEY (supersedes_id, case_id) REFERENCES documents (id, case_id) ON DELETE RESTRICT ON UPDATE RESTRICT;
+    END IF;
   END $$`);
 }
