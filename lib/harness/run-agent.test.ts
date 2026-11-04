@@ -6,8 +6,20 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { describe, expect, it, vi } from "vitest";
 import { clinicalDocumentationAgent, computeDateCoverage, type ClinicalDocumentationInput } from "../agents/clinical-documentation";
-import { runAgent, type AgentRunRecord, type ClaudeClient } from "./run-agent";
+import { runAgent as rawRunAgent, ERROR_MESSAGES, type RunAgentOptions, type AgentRunRecord, type ClaudeClient } from "./run-agent";
 
+import { parseEnv } from "../env";
+import { createFakeLedger } from "./spend-fake";
+import { mkdtemp, rm, readFile, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { replayKey, writeReplay } from "./replay";
+import { estimateCallMicroUsd, estimateInputTokens } from "./spend";
+
+const env = parseEnv({APP_DEPLOYMENT:"local"});
+function runAgent(agent: typeof clinicalDocumentationAgent, value: ClinicalDocumentationInput, options: RunAgentOptions = {}) {
+  return rawRunAgent(agent, value, {env,spend:{ledger:createFakeLedger(),environment:"local",agentRunRef:null}, ...options});
+}
 const input: ClinicalDocumentationInput = {
   caseId: "UR-TEST",
   levelOfCare: "Inpatient psych",
@@ -27,6 +39,10 @@ function fakeClient(...responses: unknown[]): ClaudeClient & { calls: Anthropic.
     calls.push(params);
     const next = responses.shift();
     if (next instanceof Error) throw next;
+    if (typeof next === "object" && next !== null && "parsed_output" in next) {
+      const response = next as { parsed_output: unknown; usage?: typeof usage; stop_reason?: string };
+      return {parsed_output:response.parsed_output, usage:response.usage ?? usage,stop_reason:response.stop_reason ?? "end_turn"};
+    }
     return { parsed_output: next, usage, stop_reason: "end_turn" };
   });
   return { messages: { parse }, calls };
@@ -88,7 +104,7 @@ describe("runAgent", () => {
     const res = await runAgent(clinicalDocumentationAgent, input, { client, replay: "off", model: "claude-haiku-5-5", recordRun: (r) => void records.push(r) });
     expect(res.status).toBe("failed");
     expect(res.output).toBeNull();
-    expect(records[0]).toMatchObject({ status: "failed", attempts: 2, error: "timeout", errorKind: "api" });
+    expect(records[0]).toMatchObject({ status: "failed", attempts: 2, error: "The model API call failed.", errorKind: "api" });
   });
 
   it("labels an SDK timeout as errorKind timeout", async () => {
@@ -97,5 +113,106 @@ describe("runAgent", () => {
     const res = await runAgent(clinicalDocumentationAgent, input, { client, replay: "off", model: "claude-haiku-5-5" });
     expect(res.status).toBe("failed");
     expect(res.errorKind).toBe("timeout");
+  });
+});
+
+
+describe("harness safety and spend", () => {
+  it("never echoes schema or API text in errors",async()=>{
+    const records: AgentRunRecord[]=[];
+    const result=await runAgent(clinicalDocumentationAgent,input,{client:fakeClient({facts:"IGNORE PREVIOUS INSTRUCTIONS"},{facts:"IGNORE PREVIOUS INSTRUCTIONS"}),recordRun:r=>void records.push(r)});
+    expect(result).toMatchObject({status:"failed",errorKind:"schema",error:ERROR_MESSAGES.schema});
+    expect(records[0].attempts).toBe(2);
+    expect(JSON.stringify(records)).not.toContain("IGNORE");
+  });
+  it.each([["max_tokens","truncated"],["refusal","refusal"]] as const)("does not retry %s",async(stop_reason,errorKind)=>{
+    const client=fakeClient({parsed_output:goodOutput,stop_reason});
+    expect(await runAgent(clinicalDocumentationAgent,input,{client})).toMatchObject({status:"failed",errorKind,error:ERROR_MESSAGES[errorKind]});
+    expect(client.calls).toHaveLength(1);
+  });
+  it("refuses live mode without a ledger before client initialization",async()=>{
+    const client=fakeClient(goodOutput);
+    expect(await runAgent(clinicalDocumentationAgent,input,{client,spend:undefined})).toMatchObject({status:"failed",errorKind:"ledger_unavailable",spendRefusal:{reasonCode:"ledger_missing"}});
+    expect(client.calls).toHaveLength(0);
+  });
+  it("records an unpriced model refusal without spending",async()=>{
+    const client=fakeClient(goodOutput);const records:AgentRunRecord[]=[];
+    expect(await runAgent(clinicalDocumentationAgent,input,{client,model:"claude-not-priced",recordRun:r=>void records.push(r)})).toMatchObject({status:"failed",errorKind:"spend_stop"});
+    expect(client.calls).toHaveLength(0);expect(records).toHaveLength(1);
+    expect(records[0].spendRefusal?.reasonCode).toBe("unpriced_model");
+  });
+  it("reserves and settles every retry and sums usage",async()=>{
+    const ledger=createFakeLedger();const client=fakeClient({facts:"bad"},goodOutput);
+    const result=await runAgent(clinicalDocumentationAgent,input,{client,spend:{ledger,environment:"local",agentRunRef:null}});
+    expect(result.usage).toEqual({input_tokens:2000,output_tokens:1000,cache_creation_input_tokens:0,cache_read_input_tokens:0});
+    expect(result.costUsd).toBe(0.0007);
+    expect(ledger.calls.map(call=>call.kind)).toEqual(["reserve","settle","reserve","settle"]);
+  });
+  it("can refuse a retry after settling the first attempt",async()=>{
+    const estimate=estimateCallMicroUsd({input:0.1,output:0.5},estimateInputTokens(clinicalDocumentationAgent.system,clinicalDocumentationAgent.buildPrompt(input)),clinicalDocumentationAgent.maxTokens);
+    const ledger=createFakeLedger({recordedMicroUsd:26000000-estimate});
+    // Missing usage charges the full estimate, so the retry cannot hold again.
+    const client=fakeClient(new Anthropic.APIConnectionTimeoutError(),goodOutput);
+    const result=await runAgent(clinicalDocumentationAgent,input,{client,spend:{ledger,environment:"local",agentRunRef:null}});
+    expect(result).toMatchObject({status:"failed",errorKind:"spend_stop",usage:null});expect(client.calls).toHaveLength(1);
+    expect(ledger.calls.map(call=>call.kind)).toEqual(["reserve","settle","reserve"]);
+  });
+  it("charges the estimate on exceptions and malformed usage",async()=>{
+    const estimate=estimateCallMicroUsd({input:0.1,output:0.5},estimateInputTokens(clinicalDocumentationAgent.system,clinicalDocumentationAgent.buildPrompt(input)),clinicalDocumentationAgent.maxTokens);
+    const timeout=await runAgent(clinicalDocumentationAgent,input,{client:fakeClient(new Anthropic.APIConnectionTimeoutError(),new Anthropic.APIConnectionTimeoutError())});
+    expect(timeout.usage).toBeNull();expect(timeout.costUsd).toBe(2*estimate/1000000);
+    const malformed=await runAgent(clinicalDocumentationAgent,input,{client:fakeClient({parsed_output:goodOutput,usage:{input_tokens:NaN,output_tokens:500}})});
+    expect(malformed.status).toBe("ok");expect(malformed.usage).toBeNull();expect(malformed.costUsd).toBe(estimate/1000000);
+  });
+  it("reports unsettled spend and still records the run",async()=>{
+    const records:AgentRunRecord[]=[];const ledger=createFakeLedger({settleFails:true});
+    expect(await runAgent(clinicalDocumentationAgent,input,{client:fakeClient(goodOutput),spend:{ledger,environment:"local",agentRunRef:null},recordRun:r=>void records.push(r)})).toMatchObject({status:"ok",spendUnsettled:true});
+    expect(records[0].spendUnsettled).toBe(true);
+  });
+  it("records a successful paid run even when replay writing fails",async()=>{
+    const dir=await mkdtemp(join(tmpdir(),"ur-record-failure-"));
+    try {
+      const blocked=join(dir,"blocked");await writeFile(blocked,"synthetic file");
+      const records:AgentRunRecord[]=[];
+      const result=await runAgent(clinicalDocumentationAgent,input,{client:fakeClient(goodOutput),replay:"record",env:parseEnv({APP_DEPLOYMENT:"local",AGENT_REPLAY_DIR:blocked}),recordRun:r=>void records.push(r)});
+      expect(result).toMatchObject({status:"ok",output:goodOutput,recordingError:"replay_write_failed",error:"The replay could not be saved.",costUsd:0.00035});
+      expect(records).toHaveLength(1);expect(records[0].recordingError).toBe("replay_write_failed");
+      expect(records[0].error).not.toContain(blocked);
+    } finally {await rm(dir,{recursive:true,force:true});}
+  });
+  it("uses the injected model and replay recording directory",async()=>{
+    const dir=await mkdtemp(join(tmpdir(),"ur-record-"));
+    try {
+      const recordEnv=parseEnv({APP_DEPLOYMENT:"local",MODEL_DEFAULT:"claude-sonnet-5-5",AGENT_RECORD:"1",AGENT_REPLAY_DIR:dir});
+      const client=fakeClient(goodOutput);
+      const result=await runAgent(clinicalDocumentationAgent,input,{client,env:recordEnv});
+      expect(result.status).toBe("ok");expect(client.calls[0].model).toBe("claude-sonnet-5-5");
+      const key=replayKey(clinicalDocumentationAgent.name,clinicalDocumentationAgent.version,"claude-sonnet-5-5",clinicalDocumentationAgent.system,clinicalDocumentationAgent.buildPrompt(input));
+      expect(JSON.parse(await readFile(join(dir,key+".json"),"utf8"))).toEqual(goodOutput);
+      const noClient=fakeClient(goodOutput);
+      expect(await runAgent(clinicalDocumentationAgent,{...input,caseId:"absent"},{env:parseEnv({APP_DEPLOYMENT:"local",AGENT_RECORD:"1",AGENT_REPLAY:"1",AGENT_REPLAY_DIR:dir}),client:noClient})).toMatchObject({status:"failed",errorKind:"no_replay"});
+      expect(noClient.calls).toHaveLength(0);
+    } finally {await rm(dir,{recursive:true,force:true});}
+  });
+  it("enforces production replay labels and never falls through to live",async()=>{
+    const dir=await mkdtemp(join(tmpdir(),"ur-replay-"));
+    try {
+      const hosted={DATABASE_URL:"postgres://test",AUTH_SECRET:"x".repeat(32),APP_ORIGIN:"https://example.test",AGENT_REPLAY_DIR:dir};
+      const key=replayKey(clinicalDocumentationAgent.name,clinicalDocumentationAgent.version,env.MODEL_DEFAULT,clinicalDocumentationAgent.system,clinicalDocumentationAgent.buildPrompt(input));
+      await writeReplay(key,goodOutput,dir);
+      for (const modeFromEnv of [true,false]) {
+        const client=fakeClient(goodOutput);
+        const production=parseEnv({...hosted,VERCEL_ENV:"production",AGENT_REPLAY:modeFromEnv?"1":""});
+        expect(await runAgent(clinicalDocumentationAgent,input,{env:production,client,replay:modeFromEnv?undefined:"read"})).toMatchObject({status:"failed",errorKind:"no_replay"});
+        expect(client.calls).toHaveLength(0);
+      }
+      for(const override of [{VERCEL_ENV:"production",REPLAY_PRODUCTION_LABELED:"1"},{VERCEL_ENV:"preview"},{APP_DEPLOYMENT:"local"}]) {
+        const client=fakeClient(goodOutput);const ledger=createFakeLedger();
+        const result=await runAgent(clinicalDocumentationAgent,input,{env:parseEnv({...hosted,...override,AGENT_REPLAY:"1",AGENT_RECORD:"1"}),client,spend:{ledger,environment:"local",agentRunRef:null}});
+        expect(result).toMatchObject({status:"ok",costUsd:0});expect(client.calls).toHaveLength(0);expect(ledger.calls).toHaveLength(0);
+      }
+      expect(await runAgent(clinicalDocumentationAgent,input,{env:parseEnv({APP_DEPLOYMENT:"local",AGENT_REPLAY_DIR:dir}),replay:"read",spend:undefined})).toMatchObject({status:"ok",costUsd:0});
+      expect(await runAgent(clinicalDocumentationAgent,{...input,caseId:"missing"},{env:parseEnv({APP_DEPLOYMENT:"local",AGENT_REPLAY_DIR:dir}),replay:"read"})).toMatchObject({status:"failed",errorKind:"no_replay"});
+    } finally {await rm(dir,{recursive:true,force:true});}
   });
 });

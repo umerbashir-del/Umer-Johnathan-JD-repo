@@ -24,6 +24,7 @@
  */
 import { z } from "zod";
 import { formatDocuments, type SourceDocument } from "../harness/documents";
+import { wrapUntrusted } from "../harness/untrusted";
 import { Gap, Quote, SHARED_RULES } from "./shared";
 import type { AgentDef } from "./types";
 
@@ -131,9 +132,7 @@ How to work:
 function buildPrompt(input: ClinicalDocumentationInput): string {
   const coverage = computeDateCoverage(input);
   return [
-    `Case: ${input.caseId}`,
-    `Level of care: ${input.levelOfCare}`,
-    `Review period: ${input.reviewPeriod.start} to ${input.reviewPeriod.end}`,
+    wrapUntrusted("db_text", [["kind", "case_context"]], JSON.stringify({ caseId: input.caseId, levelOfCare: input.levelOfCare, reviewPeriod: input.reviewPeriod })),
     "",
     "Progress note coverage (computed by code, authoritative):",
     ...coverage.map((c) => `- ${c.date}: ${c.hasNote ? "note present" : "NO NOTE"}`),
@@ -147,7 +146,7 @@ function buildPrompt(input: ClinicalDocumentationInput): string {
 // ---------------------------------------------------------------------------
 export const clinicalDocumentationAgent: AgentDef<ClinicalDocumentationInput, ClinicalDocumentationOutput> = {
   name: "clinical-documentation",
-  version: "1.0.0",
+  version: "1.2.0",
   system: SYSTEM,
   output: ClinicalDocumentationOutput,
   buildPrompt,

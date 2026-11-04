@@ -1,3 +1,4 @@
+import { fixtureId } from "./ids";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import type { DocumentType, SourceDocument } from "../harness/documents";
@@ -23,7 +24,7 @@ export interface FixtureCase {
 
 /** Minimal front matter parser for our fixtures: `key: value` lines between --- fences. */
 export function parseFrontMatter(raw: string): { meta: Record<string, string>; body: string } {
-  const m = raw.match(/^---\n([\s\S]*?)\n---\n?/);
+  const m = raw.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
   if (!m) return { meta: {}, body: raw };
   const meta: Record<string, string> = {};
   for (const line of m[1].split("\n")) {
@@ -38,10 +39,10 @@ export async function loadFixture(caseDir: string, opts: { includeLateArrival?: 
   const files: string[] = [...caseJson.documents, ...(opts.includeLateArrival ? (caseJson.late_arrival ?? []) : [])];
   const documents: SourceDocument[] = [];
   for (const file of files) {
-    if (file.includes("answer-key")) continue;
+    if (!file.endsWith(".md") || /answer-key|expected-fields|security|\.\./i.test(file)) throw new Error("invalid_fixture_path");
     const { meta, body } = parseFrontMatter(await readFile(path.join(caseDir, file), "utf8"));
     documents.push({
-      id: path.basename(file, ".md"),
+      id: fixtureId(caseJson.case.id, file),
       type: meta.type as DocumentType,
       title: meta.title ?? file,
       author: meta.author,

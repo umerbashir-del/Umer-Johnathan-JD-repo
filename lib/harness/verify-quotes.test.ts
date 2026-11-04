@@ -38,3 +38,10 @@ describe("verifyQuote", () => {
     expect(r).toMatchObject({ status: "unsupported", reason: "document_not_found" });
   });
 });
+
+
+it("maps Unicode lowercase expansions to original offsets", () => {
+  const document = {id:"unicode",type:"progress_note" as const,title:"Synthetic",version:1,content:"İX"};
+  expect(verifyQuote({documentId:"unicode",text:"x"},[document])).toMatchObject({status:"verified",start:1,end:2,excerpt:"X"});
+  expect(verifyQuote({documentId:"unicode",text:"İ"},[document])).toMatchObject({status:"verified",start:0,end:1,excerpt:"İ"});
+});

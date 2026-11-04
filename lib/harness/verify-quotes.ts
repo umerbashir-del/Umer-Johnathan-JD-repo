@@ -1,3 +1,4 @@
+import "server-only";
 /**
  * Quote verification: the main guard against invented facts.
  *
@@ -30,7 +31,7 @@ function normChar(ch: string): string {
  * Build a normalized copy of `text` (runs of whitespace collapsed to one space)
  * plus a map from each normalized index back to the original index.
  */
-function normalizeWithMap(text: string): { norm: string; map: number[] } {
+export function normalizeWithMap(text: string): { norm: string; map: number[] } {
   let norm = "";
   const map: number[] = [];
   let lastWasSpace = false;
@@ -43,8 +44,9 @@ function normalizeWithMap(text: string): { norm: string; map: number[] } {
       }
       lastWasSpace = true;
     } else {
-      norm += normChar(ch);
-      map.push(i);
+      const normalized = normChar(ch);
+      norm += normalized;
+      for (let unit = 0; unit < normalized.length; unit++) map.push(i);
       lastWasSpace = false;
     }
   }

@@ -1,3 +1,5 @@
+import "server-only";
+import { wrapUntrusted } from "./untrusted";
 /**
  * Source documents as the agents see them.
  *
@@ -28,22 +30,10 @@ export interface SourceDocument {
   content: string; // the exact text quotes are verified against
 }
 
-/** Escape characters that could close our wrapper tag early. */
-function escapeAttr(value: string): string {
-  return value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
-}
-
-/**
- * Wrap documents for a prompt. The shared rules tell the model that anything
- * inside <document> is untrusted data, never instructions (prompt-injection guard).
- */
+/** Wrap every document through the shared untrusted-text boundary. */
 export function formatDocuments(docs: SourceDocument[]): string {
-  return docs
-    .map(
-      (d) =>
-        `<document id="${escapeAttr(d.id)}" type="${d.type}" title="${escapeAttr(d.title)}"` +
-        (d.serviceDate ? ` service_date="${d.serviceDate}"` : "") +
-        ` version="${d.version}">\n${d.content}\n</document>`,
-    )
-    .join("\n\n");
+  return docs.map((d) => wrapUntrusted("document", [
+    ["id", d.id], ["type", d.type], ["title", d.title],
+    ["service_date", d.serviceDate], ["version", d.version],
+  ], d.content)).join("\n\n");
 }
