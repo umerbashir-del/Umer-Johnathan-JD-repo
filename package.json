@@ -19,7 +19,8 @@
     "test:agent-loop": "tsx --conditions=react-server e2e/agent-loop-errors.ts",
     "test:agent-loop:verify": "tsx e2e/verify-agent-loop.ts",
     "test:roles": "tsx --conditions=react-server e2e/role-permissions.ts",
-    "test:role-sessions": "tsx --conditions=react-server e2e/role-sessions.ts"
+    "test:role-sessions": "tsx --conditions=react-server e2e/role-sessions.ts",
+    "test:security": "tsx --conditions=react-server e2e/security-boundaries.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^1.4.0",

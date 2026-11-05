@@ -8,6 +8,7 @@ import { businessDate, businessNow } from "../clock";
 import { HttpError } from "../http/errors";
 import { buildHashInput, computeApprovalHash, type CanonicalValue, type HashSource } from "./approval-hash";
 import { evaluateGate, type Blocker, type GateSnapshot } from "./gate";
+import { contentHash } from "../fixtures/ids";
 
 const checkSchema = z.object({ name: z.string().min(1), result: z.enum(CHECK_RESULTS), detail: z.string().default(""), affected: z.array(z.string()).default([]), origin: z.enum(["code", "model"]).optional() });
 const reportSchema = z.object({ checks: z.array(checkSchema) });
@@ -40,7 +41,8 @@ export async function loadValidation(tx: Db, caseId: string, packetId?: string, 
   const [latestGroup] = await tx.select().from(s.runGroups).where(eq(s.runGroups.caseId, caseId)).orderBy(desc(s.runGroups.startedAt), desc(s.runGroups.createdAt)).limit(1);
   const claimRows = packet ? await tx.select().from(s.claims).where(and(eq(s.claims.caseId, caseId), eq(s.claims.packetVersionId, packet.id))) : [];
   const includedIds = new Set(packet?.includedClaimIds ?? []);
-  const checks = packet ? decode(reportSchema, packet.validationReport).checks.filter(({ name, origin }) => origin !== "code" || (name !== "packet_integrity" && name !== "evidence_integrity")) : [];
+  const recomputedChecks = new Set(["packet_integrity", "evidence_integrity", "source_integrity", "source_freshness", "source_verification"]);
+  const checks = packet ? decode(reportSchema, packet.validationReport).checks.filter(({ name, origin }) => origin !== "code" || !recomputedChecks.has(name)) : [];
   const content = packet ? decode(contentSchema, packet.content) : null;
   const documents = documentRows.map((document) => ({ ...document, verificationState: decode(z.enum(DOCUMENT_VERIFICATION_STATES), document.verificationState) }));
   const snapshot: GateSnapshot = {
@@ -60,6 +62,12 @@ export async function loadValidation(tx: Db, caseId: string, packetId?: string, 
     const blockers = evaluateGate(snapshot);
     return { packet: packet ?? null, report: { checks, blockerCodes: blockers.map(({ code }) => code) }, blockers, hash: null, hashInput: null, snapshot };
   }
+  // Check original content, not just the fingerprint stored alongside it.
+  // These code findings are recomputed on every approval/read, never accepted
+  // from model output or cleared by re-hashing a damaged packet.
+  if (documents.some(document => contentHash(document.content) !== document.contentHash)) checks.push({ name: "source_integrity", result: "fail", detail: "A source fingerprint does not match its content.", affected: [], origin: "code" });
+  if (!latestGroup || documents.some(document => document.receivedAt > latestGroup.startedAt)) checks.push({ name: "source_freshness", result: "fail", detail: "Sources arrived after the latest run began. Recheck the packet.", affected: [], origin: "code" });
+  if (documents.some(document => document.verificationState === "unverified")) checks.push({ name: "source_verification", result: "fail", detail: "A source still needs explicit verification or rejection.", affected: [], origin: "code" });
   const packetRuns = packet.runGroupId ? await tx.select().from(s.agentRuns).where(and(eq(s.agentRuns.caseId, caseId), eq(s.agentRuns.runGroupId, packet.runGroupId))) : [];
   const evidence = claimRows.length ? await tx.select({ claimId: s.claimEvidence.claimId, span: s.evidenceSpans, document: s.documents }).from(s.claimEvidence)
     .innerJoin(s.evidenceSpans, eq(s.claimEvidence.evidenceSpanId, s.evidenceSpans.id))
@@ -74,7 +82,7 @@ export async function loadValidation(tx: Db, caseId: string, packetId?: string, 
   const contentClaimIds = content.sections.flatMap(({ claimIds }) => claimIds);
   const layoutValid = includedIds.size > 0 && contentClaimIds.length === new Set(contentClaimIds).size && contentClaimIds.length === includedIds.size && contentClaimIds.every((id) => includedIds.has(id) && actualClaimIds.has(id));
   if (!layoutValid) checks.push({ name: "packet_integrity", result: "fail", detail: "", affected: [], origin: "code" });
-  const evidenceValid = claimRows.filter((claim) => includedIds.has(claim.id) && claim.material && claim.status === "source_verified").every((claim) => evidence.some((entry) => entry.claimId === claim.id)) && evidence.every(({ span, document }) => document.verificationState === "verified" && span.startOffset >= 0 && span.endOffset > span.startOffset && span.endOffset <= document.content.length && document.content.slice(span.startOffset, span.endOffset) === span.excerpt);
+  const evidenceValid = claimRows.filter((claim) => includedIds.has(claim.id) && claim.material && claim.status !== "rejected").every((claim) => evidence.some((entry) => entry.claimId === claim.id)) && evidence.every(({ span, document }) => document.verificationState === "verified" && span.startOffset >= 0 && span.endOffset > span.startOffset && span.endOffset <= document.content.length && document.content.slice(span.startOffset, span.endOffset) === span.excerpt);
   if (!evidenceValid) checks.push({ name: "evidence_integrity", result: "fail", detail: "", affected: [], origin: "code" });
   const source: HashSource = {
     packet: { id: packet.id, version: packet.version, kind: decode(z.enum(PACKET_KINDS), packet.kind), headings: content.sections.map(({ heading }) => heading), createdAt: packet.createdAt.toISOString() },

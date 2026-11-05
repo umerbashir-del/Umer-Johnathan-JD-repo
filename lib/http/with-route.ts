@@ -66,11 +66,17 @@ export async function executeRoute(request:Request,definition:RouteDefinition,de
   }
   const context:RouteContext={db,user:user!,caseId,body,request};
   const invoke=async(tx:Db)=>{
+   // A request can wait on the case lock after its session was read. Re-read
+   // and hold the identity row so revoked roles cannot complete queued writes.
+   const [identity]=await tx.select({id:s.users.id,role:s.users.role}).from(s.users).where(eq(s.users.id,user!.userId)).for("share");
+   if(!identity)throw new HttpError(401,"unauthorized");
+   const currentUser:SessionUser={userId:identity.id,role:identity.role};
+   if(!checkRole(currentUser,definition.action).allowed)throw new HttpError(403,"forbidden");
    if(caseId){
-    const row=await caseAccessRecord(tx,caseId,user!);
-    if(!checkCaseAccess(user,definition.action,row).allowed)throw new HttpError(404,"not_found");
+    const row=await caseAccessRecord(tx,caseId,currentUser);
+    if(!checkCaseAccess(currentUser,definition.action,row).allowed)throw new HttpError(404,"not_found");
    }
-   return definition.handler({...context,db:tx});
+   return definition.handler({...context,user:currentUser,db:tx});
   };
   const result=(definition.write||definition.action==="read_packet")&&caseId?await withCaseLock(db,caseId,invoke):await invoke(db);
   if(result && typeof result==="object" && "error" in result && result.error instanceof HttpError)throw result.error;
