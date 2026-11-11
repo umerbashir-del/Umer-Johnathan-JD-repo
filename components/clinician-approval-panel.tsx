@@ -6,7 +6,7 @@ import { WorkflowNotice, WorkflowReveal } from "./workflow-motion";
 import type { CaseData } from "./case-workspace";
 import { formatDate, statusLabel } from "./case-workspace";
 import { panelClass, mutedClass, buttonClass } from "./workspace-shell";
-import { ApiError, writeApi } from "@/lib/client/api";
+import { ApiError, demoActive, writeApi } from "@/lib/client/api";
 import { canSignOff, isCurrentPacketValid } from "@/lib/client/review-state";
 import { approvalRecordSchema, isReceiptCurrent, readApprovalReceipt, receiptStorageKey, type ApprovalReceipt } from "@/lib/client/approval-receipt";
 import type { Blocker } from "@/lib/client/types";
@@ -33,7 +33,9 @@ export function ClinicianApprovalPanel({ data, night, base, caseId, onChange }: 
   const changed = !signed && receipt !== null && detail.latestPacketVersion !== null && receipt.record.packetVersionId !== detail.latestPacketVersion.id;
   const muted = mutedClass(night), panel = panelClass(night);
 
+  // A replay keeps its receipt in memory only, so one viewing can't leave a stale receipt for the next or for the app.
   useEffect(() => {
+    if (demoActive()) return;
     try { setReceipt(readApprovalReceipt(localStorage.getItem(receiptStorageKey(clinician.id, caseId)), clinician.id, caseId)); }
     catch { setStorageWarning(true); }
   }, [clinician.id, caseId]);
@@ -48,7 +50,7 @@ export function ClinicianApprovalPanel({ data, night, base, caseId, onChange }: 
       if (record.caseId !== caseId || record.approvedBy !== clinician.id || record.packetVersionId !== validation.packetVersionId || record.contentHash !== validation.contentHash || record.status !== "valid") throw new Error("approval_response_mismatch");
       const captured = { record, version: packet.version };
       setReceipt(captured);
-      try { localStorage.setItem(receiptStorageKey(clinician.id, caseId), JSON.stringify(captured)); } catch { setStorageWarning(true); }
+      if (!demoActive()) try { localStorage.setItem(receiptStorageKey(clinician.id, caseId), JSON.stringify(captured)); } catch { setStorageWarning(true); }
     } catch (cause) {
       setError(cause instanceof ApiError
         ? ({ stale_hash: "The packet changed. Review the refreshed version and acknowledge it again.", run_incomplete: "The agent run is incomplete. Finish recheck before signing off.", blockers_open: "Server validation found a blocker. Resolve the refreshed blockers before signing off." } as Record<string, string>)[cause.code] ?? `The server refused sign-off: ${cause.code.replaceAll("_", " ")}.`

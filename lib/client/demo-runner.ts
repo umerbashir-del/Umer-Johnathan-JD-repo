@@ -5,6 +5,7 @@
 export type Target = { text: string | RegExp; tag?: string };
 export type DemoStep =
   | { do: "say"; caption: string; ms?: number }
+  | { do: "stage"; stage: string }
   | { do: "click"; target: Target; caption?: string }
   | { do: "type"; target: Target; text: string; caption?: string }
   | { do: "select"; target: Target; option: string; caption?: string }
@@ -13,7 +14,7 @@ export type DemoStep =
   | { do: "point"; target: Target; caption?: string }
   | { do: "repeat"; while: Target; steps: DemoStep[]; max: number };
 
-export type RunContext = { cursor: Cursor; caption: (text: string) => void; signal: AbortSignal; files: Record<string, string>; reducedMotion: boolean };
+export type RunContext = { cursor: Cursor; caption: (text: string) => void; stage?: (id: string) => void; action?: (label: string) => void; hold?: () => Promise<void>; signal: AbortSignal; files: Record<string, string>; reducedMotion: boolean };
 export type Cursor = { move: (x: number, y: number) => Promise<void>; pulse: () => void; remove: () => void };
 
 const CANDIDATES = "a,button,summary,input,select,textarea";
@@ -46,7 +47,7 @@ export function makeCursor(reducedMotion: boolean): Cursor {
 
 const sleep = (ms: number) => new Promise<void>(done => window.setTimeout(done, ms));
 /** Slows every on-screen beat (glides, holds, typing) so viewers can follow; polling is not paced. */
-export const DEMO_PACE = 1.5;
+export const DEMO_PACE = 2.25;
 const pause = (ms: number) => sleep(ms * DEMO_PACE);
 const normalized = (value: string) => value.replace(/\s+/g, " ").trim();
 const matches = (value: string, text: Target["text"]) => typeof text === "string" ? normalized(value).includes(text) : text.test(normalized(value));
@@ -79,6 +80,14 @@ async function pointAt(el: HTMLElement, ctx: RunContext) {
   await ctx.cursor.move(box.left + Math.min(box.width / 2, 120), box.top + box.height / 2);
 }
 
+/** The name a viewer sees on a control: its own text, else its aria-label, else its label. */
+function controlName(el: HTMLElement): string {
+  const own = el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement
+    ? el.labels?.[0]?.textContent ?? "" : el.textContent ?? "";
+  const name = normalized(own || el.getAttribute("aria-label") || "").replace(/\s*[→▶]\s*$/, "");
+  return name.length > 60 ? `${name.slice(0, 57)}…` : name;
+}
+
 /** React tracks input values itself, so set through the native setter and announce the change. */
 function setValue(el: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement, value: string, event: "input" | "change") {
   const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), "value")?.set;
@@ -89,18 +98,25 @@ function setValue(el: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement
 export async function runSteps(steps: DemoStep[], ctx: RunContext): Promise<void> {
   for (const step of steps) {
     if (ctx.signal.aborted) throw new DOMException("Demo stopped", "AbortError");
-    if (step.do !== "repeat" && step.caption) ctx.caption(step.caption);
+    // A paused presenter holds the replay between steps, never mid-click.
+    await ctx.hold?.();
+    if (ctx.signal.aborted) throw new DOMException("Demo stopped", "AbortError");
+    if (step.do !== "repeat" && step.do !== "stage" && step.caption) ctx.caption(step.caption);
+    if (step.do === "say") ctx.action?.("");
     switch (step.do) {
+      case "stage": ctx.stage?.(step.stage); break;
       case "say": await pause(step.ms ?? 2200); break;
       case "point": await pointAt(await waitFor(step.target, ctx), ctx); await pause(1200); break;
       case "waitFor": await waitFor(step.target, ctx, step.timeoutMs); break;
       case "click": {
         const el = await waitFor(step.target, ctx, 30000, true);
+        ctx.action?.(`Clicked: ${controlName(el)}`);
         await pointAt(el, ctx); ctx.cursor.pulse(); el.click(); await pause(700);
         break;
       }
       case "type": {
         const el = await waitFor(step.target, ctx, 30000, true) as HTMLInputElement | HTMLTextAreaElement;
+        ctx.action?.(`Typed in: ${controlName(el)}`);
         await pointAt(el, ctx); ctx.cursor.pulse(); el.focus();
         if (ctx.reducedMotion) setValue(el, step.text, "input");
         else for (let index = 1; index <= step.text.length; index++) { setValue(el, step.text.slice(0, index), "input"); await pause(18); }
@@ -112,6 +128,7 @@ export async function runSteps(steps: DemoStep[], ctx: RunContext): Promise<void
         await pointAt(el, ctx); ctx.cursor.pulse();
         const option = Array.from(el.options).find(item => normalized(item.text).includes(step.option));
         if (!option) throw new Error(`demo_option_missing: ${step.option}`);
+        ctx.action?.(`Chose: ${normalized(option.text)}`);
         setValue(el, option.value, "change"); await pause(900);
         break;
       }
@@ -119,6 +136,7 @@ export async function runSteps(steps: DemoStep[], ctx: RunContext): Promise<void
         const el = await waitFor(step.target, ctx, 30000, true) as HTMLInputElement;
         const content = ctx.files[step.file];
         if (content === undefined) throw new Error(`demo_file_missing: ${step.file}`);
+        ctx.action?.(`Attached: ${step.name}`);
         await pointAt(el, ctx); ctx.cursor.pulse();
         const transfer = new DataTransfer();
         transfer.items.add(new File([content], step.name, { type: "text/markdown" }));

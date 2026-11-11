@@ -35,3 +35,6 @@ test-results/
 # Isolated browser-test reports and Next output
 .e2e-results/
 .role-demo-logins.txt
+
+# Local demo recordings (large binaries; kept out of git)
+/demo-videos/

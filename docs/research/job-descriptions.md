@@ -3,7 +3,7 @@
 ## The JD we build around
 
 **Authorization (UR) Specialist, Ritten.** Ritten makes an EHR and practice-management system for behavioral-health providers. The role sits on its Revenue Cycle Management team and is hybrid, based in Philadelphia.
-https://www.ritten.io/jobs/authorization-ur-specialist (read Nov 3, 2026; summarized below in our words, so see the link for the exact wording)
+https://www.ritten.io/jobs/authorization-ur-specialist (read Nov 3, 2026; summarized below in our words, so see the link for the exact wording) Saved copy: [ritten-authorization-ur-specialist-jd.pdf](ritten-authorization-ur-specialist-jd.pdf).
 
 **The role.** The specialist gets and maintains prior authorizations and concurrent reviews across behavioral-health levels of care, payers and states. They are the **first line of defense against authorization-related denials**, and they coordinate with the intake, clinical and billing teams.
 
